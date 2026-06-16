@@ -3,17 +3,16 @@
 **DevOps Deployment Monitoring Dashboard**
 
 [![CI](https://github.com/yourusername/releaseguard/actions/workflows/ci.yml/badge.svg)](https://github.com/yourusername/releaseguard/actions/workflows/ci.yml)
+[![Deploy](https://github.com/yourusername/releaseguard/actions/workflows/deploy.yml/badge.svg)](https://github.com/yourusername/releaseguard/actions/workflows/deploy.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 > A production-style DevOps dashboard for tracking deployments, monitoring service health, and documenting rollback decisions.
-
-**Live Demo:** [https://releaseguard.example.com](https://releaseguard.example.com)
 
 ---
 
 ## What This Project Demonstrates
 
-Built and deployed ReleaseGuard, a production-style DevOps dashboard using Next.js, FastAPI, PostgreSQL, Docker, GitHub Actions, AWS ECR/ECS, and Terraform-ready infrastructure to track deployments, monitor service health, and document rollback decisions.
+Built and deployed ReleaseGuard, a production-style DevOps dashboard using Next.js, FastAPI, PostgreSQL, Docker, GitHub Actions, AWS ECR, and a self-managed Kubernetes cluster to track deployments, monitor service health, and document rollback decisions.
 
 ---
 
@@ -32,7 +31,8 @@ In modern DevOps workflows, teams need visibility into what was deployed, when, 
 - **Environment Status** — Monitor staging, production, and development environments with per-service health
 - **Rollback Logging** — Document rollback decisions with version tracking (logging-only, no destructive automation)
 - **CI/CD Integration** — GitHub Actions workflows for testing and deployment
-- **AWS Ready** — Terraform infrastructure for ECR, ECS Fargate, and RDS
+- **AWS ECR** — Docker image storage with GitHub OIDC authentication (no static keys)
+- **Kubernetes** — Self-managed cluster deployment via kubectl
 
 ## Tech Stack
 
@@ -43,8 +43,8 @@ In modern DevOps workflows, teams need visibility into what was deployed, when, 
 | Database | PostgreSQL 16 |
 | Container | Docker, Docker Compose |
 | CI/CD | GitHub Actions |
-| Cloud | AWS ECR, ECS Fargate, RDS |
-| IaC | Terraform |
+| Cloud | AWS ECR |
+| Deploy | Self-managed Kubernetes (via SSH + kubectl) |
 | E2E Testing | Playwright |
 
 ## Architecture
@@ -52,7 +52,7 @@ In modern DevOps workflows, teams need visibility into what was deployed, when, 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │     Frontend    │────▶│     Backend     │────▶│    PostgreSQL   │
-│    (Next.js)    │     │    (FastAPI)    │     │      (RDS)      │
+│    (Next.js)    │     │    (FastAPI)    │     │                 │
 │   Port 3000     │     │   Port 8000     │     │   Port 5432     │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
         │                       │
@@ -151,39 +151,62 @@ npx playwright test
 
 ## CI/CD Workflow
 
-### Continuous Integration
+### Two Workflows
+
+| Workflow | File | Trigger | Purpose |
+|----------|------|---------|---------|
+| **CI** | `ci.yml` | Push to `main`/`develop`, PRs to `main` | Run tests, lint, type checks |
+| **Deploy** | `deploy.yml` | Push to `main` | Build images and deploy to Kubernetes |
+
+### Continuous Integration (`ci.yml`)
 
 On every push and pull request:
 1. Backend tests run with pytest (SQLite for fast isolation)
 2. Frontend lint and TypeScript type checks
 3. Docker build validation
 
-### Continuous Deployment
+### Continuous Deployment (`deploy.yml`)
 
 On push to `main`:
-1. Docker images built and tagged with commit SHA
-2. Images pushed to AWS ECR
-3. ECS service updated with new task definition
-4. Health check verification
-5. Deployment metadata recorded via API
+1. Builds backend Docker image
+2. Builds frontend Docker image
+3. Pushes both to **the same ECR repository** using different tags
+4. SSHs into Kubernetes control-plane
+5. Updates both deployments via `kubectl set image`
+6. Waits for rollout status
+7. Shows pods and services for verification
+8. Optionally records deployment metadata (if `API_URL` is set)
+
+### ECR Image Tags
+
+Both images share one ECR repository with tag prefixes:
+
+| Image | Tags |
+|-------|------|
+| Backend | `backend-<commit-sha>`, `backend-latest` |
+| Frontend | `frontend-<commit-sha>`, `frontend-latest` |
 
 See [docs/ci-cd-flow.md](docs/ci-cd-flow.md) for detailed setup.
 
-## AWS Deployment
+## Deployment
 
-See [docs/aws-deployment.md](docs/aws-deployment.md) for full guide.
-
-See [docs/github-actions-deployment-procedure.md](docs/github-actions-deployment-procedure.md) for the complete step-by-step deployment procedure covering Terraform, GitHub OIDC, ECR, ECS, and CI/CD pipeline setup.
+See [docs/github-actions-deployment-procedure.md](docs/github-actions-deployment-procedure.md) for the complete step-by-step deployment procedure.
 
 **Quick version:**
 
 ```bash
-# Set up infrastructure
-cd infra/terraform
-terraform apply -var="db_password=YOUR_PASSWORD"
+# 1. Ensure your ECR repository exists
+aws ecr describe-repositories --repository-names infra-dev/backend-api
 
-# Configure GitHub secrets (AWS_ROLE_ARN)
-# Push to main to trigger deployment
+# 2. Apply Kubernetes manifests (first time only)
+kubectl apply -f k8s/backend-deployment.yaml
+kubectl apply -f k8s/frontend-deployment.yaml
+kubectl create secret generic releaseguard-secrets \
+  --namespace releaseguard \
+  --from-literal=database-url='postgresql+asyncpg://...'
+
+# 3. Push to main to trigger deployment
+git push origin main
 ```
 
 **Required GitHub Secrets:**
@@ -191,15 +214,22 @@ terraform apply -var="db_password=YOUR_PASSWORD"
 | Secret | Description |
 |--------|-------------|
 | `AWS_ROLE_ARN` | IAM role ARN for OIDC authentication |
+| `K8S_SSH_HOST` | SSH hostname of the Kubernetes control-plane |
+| `K8S_SSH_USER` | SSH username for the control-plane node |
+| `K8S_SSH_PRIVATE_KEY` | SSH private key for authentication |
 
 **Required GitHub Variables:**
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AWS_REGION` | `us-east-1` | AWS region |
-| `ECR_REPOSITORY` | `releaseguard` | ECR repository prefix |
-| `ECS_CLUSTER` | `releaseguard` | ECS cluster name |
-| `ECS_SERVICE` | `releaseguard-service` | ECS service name |
+| `AWS_REGION` | `ap-south-1` | AWS region for ECR |
+| `ECR_REPOSITORY` | `infra-dev/backend-api` | ECR repository (shared for both images) |
+| `K8S_NAMESPACE` | `releaseguard` | Kubernetes namespace |
+| `BACKEND_DEPLOYMENT` | `releaseguard-backend` | Backend deployment name |
+| `FRONTEND_DEPLOYMENT` | `releaseguard-frontend` | Frontend deployment name |
+| `BACKEND_CONTAINER` | `backend` | Backend container name |
+| `FRONTEND_CONTAINER` | `frontend` | Frontend container name |
+| `API_URL` | _(empty)_ | Optional. Backend URL for deployment metadata recording |
 
 ## Security
 
@@ -207,8 +237,8 @@ terraform apply -var="db_password=YOUR_PASSWORD"
 - GitHub OIDC for AWS authentication (no long-lived keys)
 - Input validation on all API endpoints via Pydantic
 - CORS configured for frontend origin only
-- Database in private subnet with encryption at rest
 - ECR image scanning enabled
+- Kubernetes secrets for sensitive configuration
 
 See [docs/security.md](docs/security.md) for details.
 
@@ -237,6 +267,8 @@ releaseguard/
 │   └── tests/             # Backend tests
 ├── infra/terraform/       # AWS infrastructure
 ├── .github/workflows/     # CI/CD pipelines
+│   ├── ci.yml             # Tests and checks
+│   └── deploy.yml         # Kubernetes deployment
 └── docs/                  # Documentation
 ```
 
@@ -247,14 +279,13 @@ releaseguard/
 - **API design**: RESTful with Pydantic validation, filtering, pagination
 - **Docker**: Multi-stage builds, health checks, service orchestration
 - **CI/CD**: GitHub Actions with parallel jobs, Docker build validation
-- **AWS**: ECR + ECS Fargate with OIDC authentication (no static keys)
-- **IaC**: Terraform with VPC, ECS, RDS, CloudWatch
-- **Security**: Input validation, CORS, encryption, no hardcoded secrets
-- **Observability**: Health endpoints, structured logging, status tracking
+- **Cloud**: AWS ECR for image registry, GitHub OIDC for authentication (no static keys)
+- **Kubernetes**: Self-managed cluster deployment via kubectl, rolling updates, readiness probes
+- **Security**: Input validation, CORS, no hardcoded secrets, ECR image scanning
 
 ## Resume Bullet
 
-> Built and deployed ReleaseGuard, a production-style DevOps dashboard using Next.js, FastAPI, PostgreSQL, Docker, GitHub Actions, AWS ECR/ECS, and Terraform-ready infrastructure to track deployments, monitor service health, and document rollback decisions.
+> Built and deployed ReleaseGuard, a production-style DevOps dashboard using Next.js, FastAPI, PostgreSQL, Docker, GitHub Actions, AWS ECR, and self-managed Kubernetes to track deployments, monitor service health, and document rollback decisions.
 
 ## Known Limitations
 

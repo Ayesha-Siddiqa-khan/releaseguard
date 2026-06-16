@@ -4,6 +4,13 @@
 
 ReleaseGuard uses GitHub Actions for continuous integration and deployment with a secure, modern approach.
 
+| Workflow | File | Purpose |
+|----------|------|---------|
+| **CI** | `ci.yml` | Run tests, lint, type checks on every push/PR |
+| **Deploy** | `deploy.yml` | Build images and deploy to Kubernetes on push to `main` |
+
+---
+
 ## CI Workflow (`ci.yml`)
 
 Triggers on push to `main`/`develop` and pull requests to `main`.
@@ -35,39 +42,75 @@ backend-tests ─┐
 frontend-lint ─┘
 ```
 
+---
+
 ## Deploy Workflow (`deploy.yml`)
 
-Triggers on push to `main` only.
+Triggers on push to `main` only. Builds and deploys both backend and frontend together.
+
+### How It Works
+
+```
+Push to main
+  → Build backend Docker image
+  → Build frontend Docker image
+  → Push both to ECR (same repo, different tags)
+  → SSH into Kubernetes control-plane
+  → kubectl set image (backend + frontend)
+  → Wait for rollout status
+  → Show pods and services
+```
 
 ### Jobs
 
 #### 1. Build & Push to ECR
 - Authenticates via GitHub OIDC → AWS IAM Role (no static keys)
 - Logs into Amazon ECR
-- Builds backend image, tags with commit SHA + `latest`
-- Builds frontend image, tags with commit SHA + `latest`
-- Pushes both images to ECR
+- Builds backend image, pushes as `backend-<sha>` and `backend-latest`
+- Builds frontend image, pushes as `frontend-<sha>` and `frontend-latest`
+- **Both images go to the same ECR repository** (e.g., `infra-dev/backend-api`)
 
-#### 2. Deploy to ECS
-- Updates ECS service with `--force-new-deployment`
-- Waits for service stability
-- Records deployment metadata via `POST /api/deployments`
+#### 2. Deploy to Kubernetes
+- SSHs into the Kubernetes control-plane node
+- Runs `kubectl set image` for both backend and frontend deployments
+- Waits for rollout status (300s timeout)
+- Shows all pods and services for verification
+- Optionally records deployment metadata via `POST /api/deployments` (if `API_URL` is set)
 
 ### Required Secrets
 
 | Secret | Description |
 |--------|-------------|
 | `AWS_ROLE_ARN` | IAM role ARN for OIDC authentication |
+| `K8S_SSH_HOST` | SSH hostname/IP of the Kubernetes control-plane |
+| `K8S_SSH_USER` | SSH username for the control-plane node |
+| `K8S_SSH_PRIVATE_KEY` | SSH private key for authentication |
 
 ### Required Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AWS_REGION` | `us-east-1` | AWS region |
-| `ECR_REPOSITORY` | `releaseguard` | ECR repository prefix |
-| `ECS_CLUSTER` | `releaseguard` | ECS cluster name |
-| `ECS_SERVICE` | `releaseguard-service` | ECS service name |
-| `API_URL` | `http://localhost:8000` | Backend URL for metadata recording |
+| `AWS_REGION` | `ap-south-1` | AWS region for ECR |
+| `ECR_REPOSITORY` | `infra-dev/backend-api` | ECR repository (shared for both images) |
+| `K8S_NAMESPACE` | `releaseguard` | Kubernetes namespace |
+| `BACKEND_DEPLOYMENT` | `releaseguard-backend` | Backend deployment name |
+| `FRONTEND_DEPLOYMENT` | `releaseguard-frontend` | Frontend deployment name |
+| `BACKEND_CONTAINER` | `backend` | Backend container name |
+| `FRONTEND_CONTAINER` | `frontend` | Frontend container name |
+| `API_URL` | _(empty)_ | Optional. Backend URL for metadata recording |
+
+### ECR Image Tags
+
+Both images are pushed to the **same ECR repository** using tags to differentiate:
+
+| Image | Tag Pattern | Example |
+|-------|-------------|---------|
+| Backend | `backend-<commit-sha>` | `backend-abc123def456` |
+| Backend | `backend-latest` | `backend-latest` |
+| Frontend | `frontend-<commit-sha>` | `frontend-abc123def456` |
+| Frontend | `frontend-latest` | `frontend-latest` |
+
+---
 
 ## GitHub OIDC Setup
 
@@ -75,7 +118,7 @@ Instead of long-lived AWS access keys, ReleaseGuard uses OIDC federation:
 
 1. Create an IAM OIDC provider for `token.actions.githubusercontent.com`
 2. Create an IAM role with trust policy for GitHub Actions
-3. Attach policies for ECR push and ECS deploy
+3. Attach policies for ECR push
 4. Store the role ARN in GitHub Secrets
 
 ### Trust Policy
@@ -103,10 +146,11 @@ Instead of long-lived AWS access keys, ReleaseGuard uses OIDC federation:
 }
 ```
 
-### Required IAM Policies
+### Required IAM Policy
 
 - `AmazonEC2ContainerRegistryPowerUser` (or custom ECR policy)
-- `AmazonECS_FullAccess` (or custom ECS policy)
+
+---
 
 ## Local Development
 

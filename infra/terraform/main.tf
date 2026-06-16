@@ -280,7 +280,7 @@ resource "aws_ecs_task_definition" "frontend" {
       environment = [
         {
           name  = "NEXT_PUBLIC_API_URL"
-          value = "http://${aws_db_instance.main.endpoint}"
+          value = "http://${aws_ecs_service.backend.name}:8000"
         }
       ]
       logConfiguration = {

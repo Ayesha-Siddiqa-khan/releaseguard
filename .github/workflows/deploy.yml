@@ -1,28 +1,122 @@
+# ============================================================
+# ReleaseGuard - Deploy to Kubernetes
+# ============================================================
+# This workflow builds Docker images, pushes them to AWS ECR,
+# and deploys them to a self-managed Kubernetes cluster via SSH.
+#
+# Trigger: Push to main branch
+#
+# What it does:
+#   1. Builds backend and frontend Docker images
+#   2. Tags and pushes both images to the SAME ECR repository
+#      using different tags (backend-<sha>, frontend-<sha>)
+#   3. SSHs into your Kubernetes control-plane node
+#   4. Runs kubectl to update the deployments
+#   5. Waits for pods to be ready
+# ============================================================
+
 name: Deploy
 
 on:
   push:
     branches: [main]
 
-env:
-  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'releaseguard' }}
-  ECS_CLUSTER: ${{ vars.ECS_CLUSTER || 'releaseguard' }}
-  ECS_SERVICE: ${{ vars.ECS_SERVICE || 'releaseguard-service' }}
-
+# Required for GitHub OIDC (AWS authentication without secrets)
 permissions:
   id-token: write
   contents: read
 
+env:
+  # AWS / ECR settings (set these as GitHub Variables)
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'infra-dev/backend-api' }}
+
+  # Kubernetes settings (set these as GitHub Variables)
+  K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE || 'releaseguard' }}
+  BACKEND_DEPLOYMENT: ${{ vars.BACKEND_DEPLOYMENT || 'releaseguard-backend' }}
+  FRONTEND_DEPLOYMENT: ${{ vars.FRONTEND_DEPLOYMENT || 'releaseguard-frontend' }}
+  BACKEND_CONTAINER: ${{ vars.BACKEND_CONTAINER || 'backend' }}
+  FRONTEND_CONTAINER: ${{ vars.FRONTEND_CONTAINER || 'frontend' }}
+
 jobs:
+  # ==========================================================
+  # JOB 1: Build Docker images and push to ECR
+  # ==========================================================
   build-and-push:
     name: Build & Push to ECR
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      # --- AWS Authentication via OIDC (no static keys!) ---
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # --- Login to ECR (returns the registry URL) ---
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # --- Build and push BACKEND image ---
+      # Tags: backend-<commit-sha> and backend-latest
+      - name: Build and push backend image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          echo "Building backend image..."
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:backend-$IMAGE_TAG ./backend
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:backend-$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:backend-latest
+
+          echo "Pushing backend image..."
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:backend-$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:backend-latest
+
+      # --- Build and push FRONTEND image ---
+      # Tags: frontend-<commit-sha> and frontend-latest
+      - name: Build and push frontend image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          echo "Building frontend image..."
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:frontend-$IMAGE_TAG ./frontend
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:frontend-$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:frontend-latest
+
+          echo "Pushing frontend image..."
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:frontend-$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:frontend-latest
+
+      # --- Print what was pushed (for debugging) ---
+      - name: Show pushed image tags
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          echo "=========================================="
+          echo "Pushed images:"
+          echo "  Backend:  $ECR_REGISTRY/$ECR_REPOSITORY:backend-$IMAGE_TAG"
+          echo "  Backend:  $ECR_REGISTRY/$ECR_REPOSITORY:backend-latest"
+          echo "  Frontend: $ECR_REGISTRY/$ECR_REPOSITORY:frontend-$IMAGE_TAG"
+          echo "  Frontend: $ECR_REGISTRY/$ECR_REPOSITORY:frontend-latest"
+          echo "=========================================="
+
+  # ==========================================================
+  # JOB 2: Deploy to Kubernetes via SSH
+  # ==========================================================
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      # --- Re-authenticate to AWS (needed if ECR login expired) ---
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
@@ -32,63 +126,93 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, tag, and push backend image
+      # --- Set up SSH key for Kubernetes control-plane access ---
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.K8S_SSH_PRIVATE_KEY }}" > ~/.ssh/k8s_key
+          chmod 600 ~/.ssh/k8s_key
+          # Add the host to known_hosts (avoids interactive prompt)
+          ssh-keyscan -H ${{ secrets.K8S_SSH_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      # --- Helper: run a command on the K8s master via SSH ---
+      # We store the SSH command as a variable to avoid repeating it
+
+      # --- Update BACKEND deployment image ---
+      - name: Deploy backend
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY-backend:$IMAGE_TAG ./backend
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY-backend:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY-backend:latest
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY-backend:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY-backend:latest
+          FULL_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:backend-$IMAGE_TAG"
+          echo "Deploying backend: $FULL_IMAGE"
 
-      - name: Build, tag, and push frontend image
+          ssh -i ~/.ssh/k8s_key -o StrictHostKeyChecking=no \
+            ${{ secrets.K8S_SSH_USER }}@${{ secrets.K8S_SSH_HOST }} \
+            "kubectl set image deployment/$BACKEND_DEPLOYMENT \
+              $BACKEND_CONTAINER=$FULL_IMAGE \
+              -n $K8S_NAMESPACE"
+
+      # --- Update FRONTEND deployment image ---
+      - name: Deploy frontend
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY-frontend:$IMAGE_TAG ./frontend
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY-frontend:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY-frontend:latest
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY-frontend:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY-frontend:latest
+          FULL_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:frontend-$IMAGE_TAG"
+          echo "Deploying frontend: $FULL_IMAGE"
 
-  deploy:
-    name: Deploy to ECS
-    runs-on: ubuntu-latest
-    needs: build-and-push
+          ssh -i ~/.ssh/k8s_key -o StrictHostKeyChecking=no \
+            ${{ secrets.K8S_SSH_USER }}@${{ secrets.K8S_SSH_HOST }} \
+            "kubectl set image deployment/$FRONTEND_DEPLOYMENT \
+              $FRONTEND_CONTAINER=$FULL_IMAGE \
+              -n $K8S_NAMESPACE"
 
-    steps:
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Deploy to ECS
+      # --- Wait for backend rollout to complete ---
+      - name: Wait for backend rollout
         run: |
-          aws ecs update-service \
-            --cluster $ECS_CLUSTER \
-            --service $ECS_SERVICE \
-            --force-new-deployment
+          echo "Waiting for backend rollout..."
+          ssh -i ~/.ssh/k8s_key -o StrictHostKeyChecking=no \
+            ${{ secrets.K8S_SSH_USER }}@${{ secrets.K8S_SSH_HOST }} \
+            "kubectl rollout status deployment/$BACKEND_DEPLOYMENT \
+              -n $K8S_NAMESPACE \
+              --timeout=300s"
 
-      - name: Wait for deployment stability
+      # --- Wait for frontend rollout to complete ---
+      - name: Wait for frontend rollout
         run: |
-          aws ecs wait services-stable \
-            --cluster $ECS_CLUSTER \
-            --services $ECS_SERVICE
+          echo "Waiting for frontend rollout..."
+          ssh -i ~/.ssh/k8s_key -o StrictHostKeyChecking=no \
+            ${{ secrets.K8S_SSH_USER }}@${{ secrets.K8S_SSH_HOST }} \
+            "kubectl rollout status deployment/$FRONTEND_DEPLOYMENT \
+              -n $K8S_NAMESPACE \
+              --timeout=300s"
 
-      - name: Health check
+      # --- Show all pods and services (for verification) ---
+      - name: Show pods and services
         run: |
-          ALB_DNS=$(aws ecs describe-services \
-            --cluster $ECS_CLUSTER \
-            --services $ECS_SERVICE \
-            --query 'services[0].loadBalancers[0].containerName' \
-            --output text)
-          echo "Deployment completed. Verify health at the application URL."
+          echo "=========================================="
+          echo "Pods in namespace: $K8S_NAMESPACE"
+          echo "=========================================="
+          ssh -i ~/.ssh/k8s_key -o StrictHostKeyChecking=no \
+            ${{ secrets.K8S_SSH_USER }}@${{ secrets.K8S_SSH_HOST }} \
+            "kubectl get pods -n $K8S_NAMESPACE -o wide"
 
+          echo ""
+          echo "=========================================="
+          echo "Services in namespace: $K8S_NAMESPACE"
+          echo "=========================================="
+          ssh -i ~/.ssh/k8s_key -o StrictHostKeyChecking=no \
+            ${{ secrets.K8S_SSH_USER }}@${{ secrets.K8S_SSH_HOST }} \
+            "kubectl get svc -n $K8S_NAMESPACE"
+
+      # --- Record deployment metadata (optional) ---
+      # Only runs if API_URL variable is set in GitHub
       - name: Record deployment metadata
+        if: vars.API_URL != ''
         run: |
-          curl -X POST "${{ vars.API_URL || 'http://localhost:8000' }}/api/deployments" \
+          echo "Recording deployment metadata..."
+          curl -s -X POST "${{ vars.API_URL }}/api/deployments" \
             -H "Content-Type: application/json" \
             -d '{
               "app_name": "releaseguard",
@@ -98,5 +222,10 @@ jobs:
               "branch": "main",
               "github_run_id": "${{ github.run_id }}",
               "triggered_by": "github-actions",
-              "release_note": "Automated deployment via GitHub Actions"
-            }' || echo "Could not record deployment metadata"
+              "release_note": "Automated deployment to Kubernetes"
+            }' || echo "Could not record metadata (API_URL not set or unreachable)"
+
+      # --- Always clean up SSH key, even if deployment fails ---
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/k8s_key

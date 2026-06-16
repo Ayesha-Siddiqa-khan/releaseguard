@@ -1,52 +1,51 @@
-# ReleaseGuard GitHub Actions Deployment Procedure
+# ReleaseGuard Deployment Procedure
 
-A complete step-by-step guide to deploy ReleaseGuard using GitHub Actions, AWS ECR, AWS ECS Fargate, Terraform, and GitHub OIDC.
+A complete step-by-step guide to deploy ReleaseGuard to a self-managed Kubernetes cluster using GitHub Actions and AWS ECR.
 
 ---
 
 ## 1. Deployment Overview
 
 ```
-Local development
-  → Git push to main
-  → GitHub Actions CI (tests + build)
-  → GitHub Actions Deploy
-  → AWS OIDC authentication
-  → Docker images built & pushed to ECR
-  → ECS Fargate service updated
-  → Health check verification
-  → Deployment metadata recorded in ReleaseGuard
+Push to main
+  → GitHub Actions: build Docker images
+  → Push to ECR (same repo, different tags)
+  → SSH into Kubernetes control-plane
+  → kubectl set image (backend + frontend)
+  → kubectl rollout status (wait for readiness)
+  → Pods running and ready
 ```
 
 | Step | What Happens |
 |------|-------------|
-| **GitHub Actions CI** | Runs backend tests, frontend lint/type-check, validates Docker builds |
-| **GitHub OIDC** | Authenticates to AWS without long-lived credentials |
-| **AWS ECR** | Stores Docker images (backend + frontend) |
-| **AWS ECS Fargate** | Runs containers serverlessly with auto-scaling |
-| **Health Check** | Verifies the new deployment is serving traffic |
-| **Deployment Record** | Posts metadata back to ReleaseGuard via API |
+| **CI (`ci.yml`)** | Runs tests, lint, and type checks on every push/PR |
+| **Deploy (`deploy.yml`)** | Builds images, pushes to ECR, deploys to Kubernetes |
+| **OIDC** | Authenticates to AWS without long-lived credentials |
+| **SSH + kubectl** | Connects to your K8s cluster and updates deployments |
+
+### What You Need
+
+- One existing ECR repository (e.g., `infra-dev/backend-api`)
+- A self-managed Kubernetes cluster with SSH access
+- GitHub OIDC configured for AWS
 
 ---
 
 ## 2. Prerequisites
 
-Before deploying, ensure you have:
-
 - [ ] GitHub account
-- [ ] AWS account with appropriate permissions
-- [ ] AWS CLI installed and configured locally (`aws configure`)
-- [ ] Terraform >= 1.0 installed
-- [ ] Docker and Docker Compose installed
+- [ ] AWS account with ECR access
+- [ ] Existing ECR repository (e.g., `infra-dev/backend-api`)
+- [ ] Self-managed Kubernetes cluster with SSH access
+- [ ] `kubectl` installed on the Kubernetes control-plane node
+- [ ] Docker and Docker Compose installed locally
 - [ ] Git installed
-- [ ] Project tests passing locally
-- [ ] Selected AWS region (default: `us-east-1`)
+- [ ] Selected AWS region (e.g., `ap-south-1`)
+- [ ] Kubernetes namespace created (e.g., `releaseguard`)
 
 ---
 
 ## 3. Local Verification Before Deployment
-
-Deployment should not start until all local checks pass.
 
 ### Start the full stack
 
@@ -97,30 +96,14 @@ docker compose down
 
 ## 4. GitHub Repository Setup
 
-### Option A: Create via GitHub MCP (automated)
-
-If GitHub MCP is available, the repository can be created automatically. See the final report for MCP results.
-
-### Option B: Manual setup
+### Create and push the repository
 
 ```bash
-# Initialize git (if not already)
-cd E:\github\releaseguard
-git init
-
-# Stage all files
+cd releaseguard
 git add .
-
-# Create initial commit
 git commit -m "feat: ReleaseGuard - DevOps deployment monitoring dashboard"
-
-# Set default branch
 git branch -M main
-
-# Add remote (replace with your repository URL)
 git remote add origin https://github.com/<YOUR_USERNAME>/releaseguard.git
-
-# Push
 git push -u origin main
 ```
 
@@ -138,67 +121,24 @@ Confirm `.gitignore` excludes:
 
 ---
 
-## 5. AWS Infrastructure Setup with Terraform
+## 5. AWS Setup
 
-### What Terraform creates
+### Your ECR repository
 
-| Resource | Purpose |
-|----------|---------|
-| VPC | Isolated network for all services |
-| Public/Private subnets | Frontend in public, database in private |
-| NAT Gateway | Outbound internet for private subnets |
-| ECR repositories | Docker image storage (backend + frontend) |
-| ECS Fargate cluster | Container orchestration |
-| ECS services | Backend and frontend task definitions |
-| RDS PostgreSQL | Managed database with encryption |
-| CloudWatch log groups | Container and application logs |
-| Security groups | Network access control |
+You already have one ECR repository for trial use. The workflow uses it for **both** backend and frontend images with different tags:
 
-### Setup commands
+| Image | Tag |
+|-------|-----|
+| Backend | `backend-<commit-sha>` |
+| Backend | `backend-latest` |
+| Frontend | `frontend-<commit-sha>` |
+| Frontend | `frontend-latest` |
+
+### Verify your ECR repository exists
 
 ```bash
-cd infra/terraform
-
-# Format HCL files
-terraform fmt
-
-# Initialize (downloads AWS provider)
-terraform init
-
-# Validate configuration
-terraform validate
-
-# Preview changes (review carefully)
-terraform plan -var="db_password=YOUR_SECURE_PASSWORD"
+aws ecr describe-repositories --repository-names infra-dev/backend-api --region ap-south-1
 ```
-
-> **Cost Warning**: `terraform plan` does not create resources. `terraform apply` WILL create billable AWS resources. Review the plan output before applying. Estimated monthly cost for this project is approximately **$65-75/month** (db.t3.micro RDS, single NAT Gateway, minimal ECS tasks).
-
-### Apply infrastructure
-
-```bash
-terraform apply -var="db_password=YOUR_SECURE_PASSWORD"
-```
-
-### Capture outputs
-
-After apply, capture the outputs for GitHub Actions configuration:
-
-```bash
-terraform output
-```
-
-You will need:
-- `ecr_backend_url`
-- `ecr_frontend_url`
-- `ecs_cluster_name`
-- `rds_endpoint`
-
----
-
-## 6. GitHub OIDC Setup for AWS
-
-GitHub Actions authenticates to AWS using OIDC (OpenID Connect), not permanent access keys.
 
 ### Create OIDC Identity Provider in AWS
 
@@ -248,18 +188,12 @@ aws iam create-role \
   --assume-role-policy-document file://trust-policy.json
 ```
 
-### Attach policies to the role
+### Attach ECR policy to the role
 
 ```bash
-# ECR access
 aws iam attach-role-policy \
   --role-name releaseguard-github-actions-role \
   --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess
-
-# ECS access
-aws iam attach-role-policy \
-  --role-name releaseguard-github-actions-role \
-  --policy-arn arn:aws:iam::aws:policy/AmazonECS_FullAccess
 ```
 
 ### Get the Role ARN
@@ -268,64 +202,210 @@ aws iam attach-role-policy \
 aws iam get-role --role-name releaseguard-github-actions-role --query 'Role.Arn' --output text
 ```
 
-The output will look like:
+Save this ARN — you will need it as `AWS_ROLE_ARN` in GitHub Secrets.
+
+---
+
+## 6. Kubernetes Cluster Setup
+
+### SSH access to control-plane
+
+GitHub Actions connects to your Kubernetes cluster via SSH. You need:
+
+1. A control-plane node with `kubectl` installed and configured
+2. SSH access from GitHub Actions to this node
+3. The node must have network access to your ECR registry
+
+### Create the Kubernetes namespace
+
+```bash
+kubectl create namespace releaseguard
 ```
-arn:aws:iam::123456789012:role/releaseguard-github-actions-role
+
+### Create Kubernetes deployments
+
+Create a file `k8s/backend-deployment.yaml`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: releaseguard-backend
+  namespace: releaseguard
+  labels:
+    app: releaseguard
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: releaseguard
+      tier: backend
+  template:
+    metadata:
+      labels:
+        app: releaseguard
+        tier: backend
+    spec:
+      containers:
+        - name: backend
+          image: <YOUR_ECR_REGISTRY>/infra-dev/backend-api:backend-latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: releaseguard-secrets
+                  key: database-url
+            - name: CORS_ORIGINS
+              value: '["http://localhost:3000","http://releaseguard-frontend"]'
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: releaseguard-backend
+  namespace: releaseguard
+spec:
+  selector:
+    app: releaseguard
+    tier: backend
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP
+```
+
+Create a file `k8s/frontend-deployment.yaml`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: releaseguard-frontend
+  namespace: releaseguard
+  labels:
+    app: releaseguard
+    tier: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: releaseguard
+      tier: frontend
+  template:
+    metadata:
+      labels:
+        app: releaseguard
+        tier: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: <YOUR_ECR_REGISTRY>/infra-dev/backend-api:frontend-latest
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NEXT_PUBLIC_API_URL
+              value: "http://releaseguard-backend:8000"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: releaseguard-frontend
+  namespace: releaseguard
+spec:
+  selector:
+    app: releaseguard
+    tier: frontend
+  ports:
+    - port: 3000
+      targetPort: 3000
+  type: LoadBalancer
+```
+
+### Apply the deployments
+
+```bash
+kubectl apply -f k8s/backend-deployment.yaml
+kubectl apply -f k8s/frontend-deployment.yaml
+```
+
+### Create secrets
+
+```bash
+kubectl create secret generic releaseguard-secrets \
+  --namespace releaseguard \
+  --from-literal=database-url='postgresql+asyncpg://releaseguard:releaseguard@postgres-host:5432/releaseguard'
 ```
 
 ---
 
 ## 7. Required GitHub Secrets and Variables
 
-### GitHub Secret
+### GitHub Secrets
 
-| Secret Name | Value | Description |
-|-------------|-------|-------------|
-| `AWS_ROLE_ARN` | `arn:aws:iam::<ACCOUNT_ID>:role/releaseguard-github-actions-role` | IAM role ARN for OIDC |
+| Secret | Description |
+|--------|-------------|
+| `AWS_ROLE_ARN` | IAM role ARN for OIDC authentication |
+| `K8S_SSH_HOST` | SSH hostname or IP of the Kubernetes control-plane |
+| `K8S_SSH_USER` | SSH username for the control-plane node |
+| `K8S_SSH_PRIVATE_KEY` | SSH private key for authentication |
 
 ### GitHub Variables
 
-| Variable Name | Default | Description |
-|---------------|---------|-------------|
-| `AWS_REGION` | `us-east-1` | AWS deployment region |
-| `ECR_REPOSITORY` | `releaseguard` | ECR repository prefix (images: `releaseguard-backend`, `releaseguard-frontend`) |
-| `ECS_CLUSTER` | `releaseguard` | ECS cluster name |
-| `ECS_SERVICE` | `releaseguard-service` | ECS service name |
-| `API_URL` | `http://localhost:8000` | Backend URL for deployment metadata recording |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AWS_REGION` | `ap-south-1` | AWS region for ECR |
+| `ECR_REPOSITORY` | `infra-dev/backend-api` | ECR repository name (shared for both images) |
+| `K8S_NAMESPACE` | `releaseguard` | Kubernetes namespace |
+| `BACKEND_DEPLOYMENT` | `releaseguard-backend` | Backend deployment name |
+| `FRONTEND_DEPLOYMENT` | `releaseguard-frontend` | Frontend deployment name |
+| `BACKEND_CONTAINER` | `backend` | Backend container name |
+| `FRONTEND_CONTAINER` | `frontend` | Frontend container name |
+| `API_URL` | _(empty)_ | Optional. Backend URL for metadata recording |
 
 ### How to add in GitHub
 
 1. Go to your repository on GitHub
 2. Click **Settings** > **Secrets and variables** > **Actions**
-3. Click **New repository secret** to add `AWS_ROLE_ARN`
+3. Click **New repository secret** to add each secret
 4. Click the **Variables** tab > **New repository variable** to add each variable
 
 ---
 
-## 8. GitHub Actions Workflow Explanation
-
-### CI Workflow (`.github/workflows/ci.yml`)
-
-Triggered on: **push to main/develop** and **pull requests to main**
-
-| Job | What It Does |
-|-----|-------------|
-| `backend-tests` | Installs Python 3.12, runs `pytest tests/ -v` with SQLite (fast, no DB needed) |
-| `frontend-lint` | Installs Node.js 20, runs `npm ci`, lint, and TypeScript type-check |
-| `docker-build` | Builds both Docker images to verify Dockerfiles work (depends on both test jobs) |
-
-### Deploy Workflow (`.github/workflows/deploy.yml`)
-
-Triggered on: **push to main only**
-
-| Job | What It Does |
-|-----|-------------|
-| `build-and-push` | Authenticates via OIDC, logs into ECR, builds Docker images, pushes with commit SHA tag and `latest` tag |
-| `deploy` | Updates ECS service with `--force-new-deployment`, waits for stability, records deployment metadata via API |
-
----
-
-## 9. How to Trigger Deployment
+## 8. How to Trigger Deployment
 
 ### Push to main branch
 
@@ -336,70 +416,58 @@ git push origin main
 ```
 
 This triggers both workflows:
-1. **CI** runs tests and lint checks
-2. **Deploy** builds and pushes Docker images, then deploys to ECS
+1. **CI (`ci.yml`)** — runs tests and lint checks
+2. **Deploy (`deploy.yml`)** — builds images, pushes to ECR, deploys to K8s
 
 ### Monitor the deployment
 
 1. **GitHub**: Go to repository > **Actions** tab > Click the latest workflow run
-2. **AWS Console**: ECS > Cluster > Service > Deployments tab
-3. **CloudWatch**: Check logs for the ECS task
-4. **ReleaseGuard Dashboard**: Deployment History should show the new deployment
+2. **Kubernetes**: SSH into the control-plane and run `kubectl get pods -n releaseguard`
+3. **ReleaseGuard Dashboard**: If `API_URL` is configured, Deployment History shows the new deployment
 
 ---
 
-## 10. Deployment Verification
-
-After the workflow completes:
+## 9. Deployment Verification
 
 ### Checklist
 
 - [ ] GitHub Actions workflow shows green checkmarks
-- [ ] ECR repositories contain the new images (`releaseguard-backend` and `releaseguard-frontend`)
-- [ ] ECS service shows running task count >= 1
-- [ ] ECS service deployment shows `PRIMARY` status
-- [ ] Backend `/health` endpoint returns `{"status": "healthy", "database": "connected"}`
+- [ ] ECR repository contains 4 new image tags (`backend-<sha>`, `backend-latest`, `frontend-<sha>`, `frontend-latest`)
+- [ ] Kubernetes pods are running and ready
+- [ ] Backend `/health` endpoint returns healthy
 - [ ] Frontend opens successfully in browser
 - [ ] ReleaseGuard dashboard loads and shows data
-- [ ] Deployment metadata appears in Deployment History
+- [ ] Deployment metadata appears in Deployment History (if `API_URL` configured)
 
 ### Verification commands
 
 ```bash
 # Check ECR images
-aws ecr describe-images --repository-name releaseguard-backend --region us-east-1
+aws ecr describe-images --repository-name infra-dev/backend-api --region ap-south-1
 
-# Check ECS service status
-aws ecs describe-services --cluster releaseguard --services releaseguard-service
+# Check Kubernetes pods
+kubectl get pods -n releaseguard
+kubectl describe deployment releaseguard-backend -n releaseguard
 
-# Health check
-curl https://<YOUR_ALB_DNS>/health
-
-# API check
-curl https://<YOUR_ALB_DNS>/api/status/summary
+# Health check (via port-forward)
+kubectl port-forward -n releaseguard svc/releaseguard-backend 8000:8000
+curl http://localhost:8000/health
 ```
 
 ---
 
-## 11. Seed Demo Data
-
-For local development or demo purposes:
+## 10. Seed Demo Data
 
 ```bash
+kubectl port-forward -n releaseguard svc/releaseguard-backend 8000:8000
 curl -X POST http://localhost:8000/api/seed
 ```
 
-Or against your deployed backend:
-
-```bash
-curl -X POST https://<YOUR_BACKEND_URL>/api/seed
-```
-
-> **Warning**: This is for demo/development only. Do not run on production data you want to keep. The seed endpoint overwrites existing data with demo deployments, environments, and rollback logs.
+> **Warning**: This is for demo/development only. Do not run on production data you want to keep.
 
 ---
 
-## 12. Troubleshooting
+## 11. Troubleshooting
 
 ### GitHub Actions cannot assume AWS role
 
@@ -411,128 +479,68 @@ curl -X POST https://<YOUR_BACKEND_URL>/api/seed
 - Check the trust policy `sub` field matches `repo:<OWNER>/releaseguard:ref:refs/heads/main`
 - Ensure the workflow has `permissions: id-token: write`
 
-### Missing `id-token: write` permission
-
-**Fix**: Add to `deploy.yml`:
-
-```yaml
-permissions:
-  id-token: write
-  contents: read
-```
-
 ### ECR repository not found
 
 **Error**: `RepositoryNotFoundException`
 
 **Fix**:
-- Run `terraform apply` first to create ECR repositories
-- Verify `ECR_REPOSITORY` variable matches Terraform's `project_name` (default: `releaseguard`)
-- The workflow creates images named `releaseguard-backend` and `releaseguard-frontend`
+- Verify `ECR_REPOSITORY` variable matches your existing repository name
+- Check the ECR region matches `AWS_REGION`
 
-### ECS service not found
+### SSH connection fails
 
-**Error**: `ServiceNotFoundException`
-
-**Fix**:
-- Run `terraform apply` first to create ECS cluster and service
-- Verify `ECS_CLUSTER` and `ECS_SERVICE` variables match Terraform outputs
-
-### Docker build fails
+**Error**: `ssh: connect to host ... Connection refused` or `Permission denied`
 
 **Fix**:
-- Check Dockerfile syntax in `backend/Dockerfile` and `frontend/Dockerfile`
-- Ensure `package-lock.json` exists in `frontend/` (required for `npm ci`)
-- Verify all source files are committed
+- Verify `K8S_SSH_HOST`, `K8S_SSH_USER`, and `K8S_SSH_PRIVATE_KEY` secrets are correct
+- Ensure the SSH key is added to `~/.ssh/authorized_keys` on the control-plane
+- Check that port 22 is open on the control-plane node
+
+### kubectl command fails
+
+**Error**: `The connection to the server was refused`
+
+**Fix**:
+- Ensure `kubectl` is installed on the control-plane node
+- Verify the kubeconfig is valid: `kubectl cluster-info`
+- Check that the Kubernetes API server is running
+
+### Rollout timeout
+
+**Error**: `error: deployment "releaseguard-backend" exceeded its progress deadline`
+
+**Fix**:
+- Check pod events: `kubectl describe deployment releaseguard-backend -n releaseguard`
+- Check pod logs: `kubectl logs -l tier=backend -n releaseguard`
+- Verify the ECR image exists and is accessible from the cluster
 
 ### Frontend cannot reach backend
 
 **Fix**:
-- Check ECS task security groups allow traffic between frontend and backend
-- Verify the frontend's `NEXT_PUBLIC_API_URL` environment variable points to the correct backend URL
-- Check ALB target groups are healthy
+- Verify `NEXT_PUBLIC_API_URL` in the frontend deployment matches the backend service name
+- Check that the backend service exists: `kubectl get svc -n releaseguard`
 
 ### Backend cannot connect to database
 
 **Fix**:
-- Verify RDS security group allows traffic from ECS tasks on port 5432
-- Check `DATABASE_URL` environment variable uses the RDS endpoint
-- Ensure RDS is in a subnet accessible from ECS tasks
-
-### Health check fails
-
-**Fix**:
-- Check ECS task logs in CloudWatch
-- Verify the `/health` endpoint returns 200
-- Ensure the container port (8000 for backend) matches the ECS task definition
-
-### `package-lock.json` missing
-
-**Error**: `npm ERR! code ENOENT` during CI
-
-**Fix**:
-
-```bash
-cd frontend
-npm install
-git add package-lock.json
-git commit -m "Add package-lock.json"
-git push
-```
+- Verify the `DATABASE_URL` secret is correct
+- Check that the database is reachable from the cluster network
 
 ---
 
-## 13. Cleanup to Avoid AWS Costs
+## 12. Cleanup
 
-> **Warning**: Running resources incur AWS charges even when not in use.
-
-### Destroy all infrastructure
+### Remove Kubernetes resources
 
 ```bash
-cd infra/terraform
-terraform destroy -var="db_password=YOUR_SECURE_PASSWORD"
+kubectl delete -f k8s/frontend-deployment.yaml
+kubectl delete -f k8s/backend-deployment.yaml
+kubectl delete namespace releaseguard
 ```
 
-### What gets destroyed
+### Remove IAM role (if no longer needed)
 
-- VPC and all subnets
-- ECS cluster and services
-- ECR repositories and images
-- RDS database instance
-- NAT Gateway
-- Security groups
-- CloudWatch log groups
-
-### Estimated costs if not destroyed
-
-| Resource | Approximate Monthly Cost |
-|----------|------------------------|
-| RDS db.t3.micro | $15 |
-| NAT Gateway | $32 |
-| ECS Fargate (minimal) | $10-15 |
-| CloudWatch logs | $1-5 |
-| ECR storage | $1-2 |
-| **Total** | **~$60-70/month** |
-
----
-
-## 14. Final Resume/GitHub Checklist
-
-- [x] README.md complete with tech stack, setup, architecture
-- [x] Screenshots directory created (`docs/screenshots/`)
-- [x] GitHub Actions CI badge in README
-- [x] Deployment procedure linked from README
-- [x] Architecture docs (`docs/architecture.md`)
-- [x] CI/CD docs (`docs/ci-cd-flow.md`)
-- [x] AWS deployment docs (`docs/aws-deployment.md`)
-- [x] Security docs (`docs/security.md`)
-- [x] No secrets committed (`.gitignore` covers `.env`, `*.tfstate`, `venv/`, `node_modules/`)
-- [x] App tested locally (Docker Compose)
-- [x] CI passing (15/15 backend tests, frontend lint clean, type-check clean, build clean)
-- [x] Deployment workflow configured (`deploy.yml`)
-- [ ] Screenshots captured (after data is visible in the dashboard)
-- [ ] GitHub repository created and code pushed
-- [ ] Terraform infrastructure applied
-- [ ] GitHub OIDC configured
-- [ ] GitHub Secrets and Variables added
-- [ ] First deployment triggered and verified
+```bash
+aws iam detach-role-policy --role-name releaseguard-github-actions-role --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess
+aws iam delete-role --role-name releaseguard-github-actions-role
+```
