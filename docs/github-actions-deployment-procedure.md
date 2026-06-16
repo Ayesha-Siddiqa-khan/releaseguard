@@ -1,6 +1,6 @@
 # ReleaseGuard Deployment Procedure
 
-A complete step-by-step guide to deploy ReleaseGuard to a self-managed Kubernetes cluster using GitHub Actions and AWS ECR.
+A complete step-by-step guide to deploy ReleaseGuard to a Kubernetes cluster using GitHub Actions, AWS ECR, and kubeconfig.
 
 ---
 
@@ -9,8 +9,8 @@ A complete step-by-step guide to deploy ReleaseGuard to a self-managed Kubernete
 ```
 Push to main
   → GitHub Actions: build Docker images
-  → Push to ECR (same repo, different tags)
-  → SSH into Kubernetes control-plane
+  → Push to ECR (same repo, SHA tags)
+  → Decode kubeconfig from KUBE_CONFIG_B64
   → kubectl set image (backend + frontend)
   → kubectl rollout status (wait for readiness)
   → Pods running and ready
@@ -21,12 +21,12 @@ Push to main
 | **CI (`ci.yml`)** | Runs tests, lint, and type checks on every push/PR |
 | **Deploy (`deploy.yml`)** | Builds images, pushes to ECR, deploys to Kubernetes |
 | **OIDC** | Authenticates to AWS without long-lived credentials |
-| **SSH + kubectl** | Connects to your K8s cluster and updates deployments |
+| **kubeconfig** | Connects to your K8s cluster and updates deployments |
 
 ### What You Need
 
 - One existing ECR repository (e.g., `infra-dev/backend-api`)
-- A self-managed Kubernetes cluster with SSH access
+- A Kubernetes cluster with a valid kubeconfig
 - GitHub OIDC configured for AWS
 
 ---
@@ -36,8 +36,8 @@ Push to main
 - [ ] GitHub account
 - [ ] AWS account with ECR access
 - [ ] Existing ECR repository (e.g., `infra-dev/backend-api`)
-- [ ] Self-managed Kubernetes cluster with SSH access
-- [ ] `kubectl` installed on the Kubernetes control-plane node
+- [ ] Kubernetes cluster with kubeconfig available
+- [ ] `kubectl` accessible in the GitHub Actions runner
 - [ ] Docker and Docker Compose installed locally
 - [ ] Git installed
 - [ ] Selected AWS region (e.g., `ap-south-1`)
@@ -208,13 +208,24 @@ Save this ARN — you will need it as `AWS_ROLE_ARN` in GitHub Secrets.
 
 ## 6. Kubernetes Cluster Setup
 
-### SSH access to control-plane
+### kubeconfig access
 
-GitHub Actions connects to your Kubernetes cluster via SSH. You need:
+GitHub Actions connects to your Kubernetes cluster using a kubeconfig file stored as a base64-encoded secret. You need:
 
-1. A control-plane node with `kubectl` installed and configured
-2. SSH access from GitHub Actions to this node
-3. The node must have network access to your ECR registry
+1. A working kubeconfig that can reach your cluster
+2. The kubeconfig base64-encoded and stored as `KUBE_CONFIG_B64` in GitHub Secrets
+
+### Encode your kubeconfig
+
+```bash
+# Linux/macOS
+cat ~/.kube/config | base64 -w 0
+
+# Windows PowerShell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:USERPROFILE\.kube\config"))
+```
+
+Copy the output and save it as the `KUBE_CONFIG_B64` secret in GitHub.
 
 ### Create the Kubernetes namespace
 
@@ -379,9 +390,7 @@ kubectl create secret generic releaseguard-secrets \
 | Secret | Description |
 |--------|-------------|
 | `AWS_ROLE_ARN` | IAM role ARN for OIDC authentication |
-| `K8S_SSH_HOST` | SSH hostname or IP of the Kubernetes control-plane |
-| `K8S_SSH_USER` | SSH username for the control-plane node |
-| `K8S_SSH_PRIVATE_KEY` | SSH private key for authentication |
+| `KUBE_CONFIG_B64` | Base64-encoded kubeconfig for cluster access |
 
 ### GitHub Variables
 
@@ -422,7 +431,7 @@ This triggers both workflows:
 ### Monitor the deployment
 
 1. **GitHub**: Go to repository > **Actions** tab > Click the latest workflow run
-2. **Kubernetes**: SSH into the control-plane and run `kubectl get pods -n releaseguard`
+2. **Kubernetes**: Run `kubectl get pods -n releaseguard`
 3. **ReleaseGuard Dashboard**: If `API_URL` is configured, Deployment History shows the new deployment
 
 ---
@@ -487,14 +496,14 @@ curl -X POST http://localhost:8000/api/seed
 - Verify `ECR_REPOSITORY` variable matches your existing repository name
 - Check the ECR region matches `AWS_REGION`
 
-### SSH connection fails
+### kubeconfig connection fails
 
-**Error**: `ssh: connect to host ... Connection refused` or `Permission denied`
+**Error**: `error: the server doesn't have a resource type "..."` or `Unable to connect to the server`
 
 **Fix**:
-- Verify `K8S_SSH_HOST`, `K8S_SSH_USER`, and `K8S_SSH_PRIVATE_KEY` secrets are correct
-- Ensure the SSH key is added to `~/.ssh/authorized_keys` on the control-plane
-- Check that port 22 is open on the control-plane node
+- Verify `KUBE_CONFIG_B64` secret contains valid base64-encoded kubeconfig
+- Re-encode: `cat ~/.kube/config | base64 -w 0`
+- Ensure the kubeconfig points to the correct cluster and has valid credentials
 
 ### kubectl command fails
 

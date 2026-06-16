@@ -44,7 +44,7 @@ In modern DevOps workflows, teams need visibility into what was deployed, when, 
 | Container | Docker, Docker Compose |
 | CI/CD | GitHub Actions |
 | Cloud | AWS ECR |
-| Deploy | Self-managed Kubernetes (via SSH + kubectl) |
+| Deploy | Kubernetes (via kubeconfig + kubectl) |
 | E2E Testing | Playwright |
 
 ## Architecture
@@ -171,7 +171,7 @@ On push to `main`:
 1. Builds backend Docker image
 2. Builds frontend Docker image
 3. Pushes both to **the same ECR repository** using different tags
-4. SSHs into Kubernetes control-plane
+4. Decodes kubeconfig from `KUBE_CONFIG_B64`
 5. Updates both deployments via `kubectl set image`
 6. Waits for rollout status
 7. Shows pods and services for verification
@@ -214,9 +214,7 @@ git push origin main
 | Secret | Description |
 |--------|-------------|
 | `AWS_ROLE_ARN` | IAM role ARN for OIDC authentication |
-| `K8S_SSH_HOST` | SSH hostname of the Kubernetes control-plane |
-| `K8S_SSH_USER` | SSH username for the control-plane node |
-| `K8S_SSH_PRIVATE_KEY` | SSH private key for authentication |
+| `KUBE_CONFIG_B64` | Base64-encoded kubeconfig for cluster access |
 
 **Required GitHub Variables:**
 

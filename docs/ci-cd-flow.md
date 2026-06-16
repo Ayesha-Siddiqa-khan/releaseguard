@@ -54,8 +54,8 @@ Triggers on push to `main` only. Builds and deploys both backend and frontend to
 Push to main
   → Build backend Docker image
   → Build frontend Docker image
-  → Push both to ECR (same repo, different tags)
-  → SSH into Kubernetes control-plane
+  → Push both to ECR (same repo, SHA tags)
+  → Decode KUBE_CONFIG_B64 into ~/.kube/config
   → kubectl set image (backend + frontend)
   → Wait for rollout status
   → Show pods and services
@@ -72,7 +72,8 @@ Push to main
 - Uses commit SHA tags only — compatible with ECR immutable tags
 
 #### 2. Deploy to Kubernetes
-- SSHs into the Kubernetes control-plane node
+- Decodes `KUBE_CONFIG_B64` secret into `~/.kube/config`
+- Verifies cluster access (`kubectl get nodes`)
 - Runs `kubectl set image` for both backend and frontend deployments
 - Waits for rollout status (300s timeout)
 - Shows all pods and services for verification
@@ -83,9 +84,7 @@ Push to main
 | Secret | Description |
 |--------|-------------|
 | `AWS_ROLE_ARN` | IAM role ARN for OIDC authentication |
-| `K8S_SSH_HOST` | SSH hostname/IP of the Kubernetes control-plane |
-| `K8S_SSH_USER` | SSH username for the control-plane node |
-| `K8S_SSH_PRIVATE_KEY` | SSH private key for authentication |
+| `KUBE_CONFIG_B64` | Base64-encoded kubeconfig for cluster access |
 
 ### Required Variables
 

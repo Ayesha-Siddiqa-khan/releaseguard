@@ -2,15 +2,15 @@
 # ReleaseGuard - Deploy to Kubernetes
 # ============================================================
 # This workflow builds Docker images, pushes them to AWS ECR,
-# and deploys them to a self-managed Kubernetes cluster via SSH.
+# and deploys them to a Kubernetes cluster using kubeconfig.
 #
 # Trigger: Push to main branch
 #
 # What it does:
 #   1. Builds backend and frontend Docker images
 #   2. Tags and pushes both images to the SAME ECR repository
-#      using different tags (backend-<sha>, frontend-<sha>)
-#   3. SSHs into your Kubernetes control-plane node
+#      using commit SHA tags (backend-<sha>, frontend-<sha>)
+#   3. Decodes KUBE_CONFIG_B64 into ~/.kube/config
 #   4. Runs kubectl to update the deployments
 #   5. Waits for pods to be ready
 # ============================================================
@@ -101,7 +101,7 @@ jobs:
           echo "=========================================="
 
   # ==========================================================
-  # JOB 2: Deploy to Kubernetes via SSH
+  # JOB 2: Deploy to Kubernetes via kubeconfig
   # ==========================================================
   deploy:
     name: Deploy to Kubernetes
@@ -109,7 +109,7 @@ jobs:
     needs: build-and-push
 
     steps:
-      # --- Re-authenticate to AWS (needed if ECR login expired) ---
+      # --- Re-authenticate to AWS (needed for ECR login in this job) ---
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -120,17 +120,26 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # --- Set up SSH key for Kubernetes control-plane access ---
-      - name: Setup SSH key
+      # --- Decode kubeconfig from base64 secret ---
+      - name: Setup kubeconfig
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.K8S_SSH_PRIVATE_KEY }}" > ~/.ssh/k8s_key
-          chmod 600 ~/.ssh/k8s_key
-          # Add the host to known_hosts (avoids interactive prompt)
-          ssh-keyscan -H ${{ secrets.K8S_SSH_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG_B64 }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
 
-      # --- Helper: run a command on the K8s master via SSH ---
-      # We store the SSH command as a variable to avoid repeating it
+      # --- Verify cluster access ---
+      - name: Verify cluster access
+        run: |
+          echo "=========================================="
+          echo "Cluster nodes:"
+          echo "=========================================="
+          kubectl get nodes
+
+          echo ""
+          echo "=========================================="
+          echo "Deployments in namespace: $K8S_NAMESPACE"
+          echo "=========================================="
+          kubectl get deploy -n $K8S_NAMESPACE
 
       # --- Update BACKEND deployment image ---
       - name: Deploy backend
@@ -141,11 +150,9 @@ jobs:
           FULL_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:backend-$IMAGE_TAG"
           echo "Deploying backend: $FULL_IMAGE"
 
-          ssh -i ~/.ssh/k8s_key -o StrictHostKeyChecking=no \
-            ${{ secrets.K8S_SSH_USER }}@${{ secrets.K8S_SSH_HOST }} \
-            "kubectl set image deployment/$BACKEND_DEPLOYMENT \
-              $BACKEND_CONTAINER=$FULL_IMAGE \
-              -n $K8S_NAMESPACE"
+          kubectl set image deployment/$BACKEND_DEPLOYMENT \
+            $BACKEND_CONTAINER=$FULL_IMAGE \
+            -n $K8S_NAMESPACE
 
       # --- Update FRONTEND deployment image ---
       - name: Deploy frontend
@@ -156,31 +163,25 @@ jobs:
           FULL_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:frontend-$IMAGE_TAG"
           echo "Deploying frontend: $FULL_IMAGE"
 
-          ssh -i ~/.ssh/k8s_key -o StrictHostKeyChecking=no \
-            ${{ secrets.K8S_SSH_USER }}@${{ secrets.K8S_SSH_HOST }} \
-            "kubectl set image deployment/$FRONTEND_DEPLOYMENT \
-              $FRONTEND_CONTAINER=$FULL_IMAGE \
-              -n $K8S_NAMESPACE"
+          kubectl set image deployment/$FRONTEND_DEPLOYMENT \
+            $FRONTEND_CONTAINER=$FULL_IMAGE \
+            -n $K8S_NAMESPACE
 
       # --- Wait for backend rollout to complete ---
       - name: Wait for backend rollout
         run: |
           echo "Waiting for backend rollout..."
-          ssh -i ~/.ssh/k8s_key -o StrictHostKeyChecking=no \
-            ${{ secrets.K8S_SSH_USER }}@${{ secrets.K8S_SSH_HOST }} \
-            "kubectl rollout status deployment/$BACKEND_DEPLOYMENT \
-              -n $K8S_NAMESPACE \
-              --timeout=300s"
+          kubectl rollout status deployment/$BACKEND_DEPLOYMENT \
+            -n $K8S_NAMESPACE \
+            --timeout=300s
 
       # --- Wait for frontend rollout to complete ---
       - name: Wait for frontend rollout
         run: |
           echo "Waiting for frontend rollout..."
-          ssh -i ~/.ssh/k8s_key -o StrictHostKeyChecking=no \
-            ${{ secrets.K8S_SSH_USER }}@${{ secrets.K8S_SSH_HOST }} \
-            "kubectl rollout status deployment/$FRONTEND_DEPLOYMENT \
-              -n $K8S_NAMESPACE \
-              --timeout=300s"
+          kubectl rollout status deployment/$FRONTEND_DEPLOYMENT \
+            -n $K8S_NAMESPACE \
+            --timeout=300s
 
       # --- Show all pods and services (for verification) ---
       - name: Show pods and services
@@ -188,17 +189,13 @@ jobs:
           echo "=========================================="
           echo "Pods in namespace: $K8S_NAMESPACE"
           echo "=========================================="
-          ssh -i ~/.ssh/k8s_key -o StrictHostKeyChecking=no \
-            ${{ secrets.K8S_SSH_USER }}@${{ secrets.K8S_SSH_HOST }} \
-            "kubectl get pods -n $K8S_NAMESPACE -o wide"
+          kubectl get pods -n $K8S_NAMESPACE -o wide
 
           echo ""
           echo "=========================================="
           echo "Services in namespace: $K8S_NAMESPACE"
           echo "=========================================="
-          ssh -i ~/.ssh/k8s_key -o StrictHostKeyChecking=no \
-            ${{ secrets.K8S_SSH_USER }}@${{ secrets.K8S_SSH_HOST }} \
-            "kubectl get svc -n $K8S_NAMESPACE"
+          kubectl get svc -n $K8S_NAMESPACE
 
       # --- Record deployment metadata (optional) ---
       # Only runs if API_URL variable is set in GitHub
@@ -219,7 +216,7 @@ jobs:
               "release_note": "Automated deployment to Kubernetes"
             }' || echo "Could not record metadata (API_URL not set or unreachable)"
 
-      # --- Always clean up SSH key, even if deployment fails ---
-      - name: Cleanup SSH key
+      # --- Always clean up kubeconfig, even if deployment fails ---
+      - name: Cleanup kubeconfig
         if: always()
-        run: rm -f ~/.ssh/k8s_key
+        run: rm -f ~/.kube/config
