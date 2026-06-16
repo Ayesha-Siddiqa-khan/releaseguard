@@ -63,7 +63,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       # --- Build and push BACKEND image ---
-      # Tags: backend-<commit-sha> and backend-latest
+      # Tag: backend-<commit-sha> (immutable, unique per commit)
       - name: Build and push backend image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -71,14 +71,12 @@ jobs:
         run: |
           echo "Building backend image..."
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:backend-$IMAGE_TAG ./backend
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:backend-$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:backend-latest
 
           echo "Pushing backend image..."
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:backend-$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:backend-latest
 
       # --- Build and push FRONTEND image ---
-      # Tags: frontend-<commit-sha> and frontend-latest
+      # Tag: frontend-<commit-sha> (immutable, unique per commit)
       - name: Build and push frontend image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -86,11 +84,9 @@ jobs:
         run: |
           echo "Building frontend image..."
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:frontend-$IMAGE_TAG ./frontend
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:frontend-$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:frontend-latest
 
           echo "Pushing frontend image..."
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:frontend-$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:frontend-latest
 
       # --- Print what was pushed (for debugging) ---
       - name: Show pushed image tags
@@ -99,11 +95,9 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
         run: |
           echo "=========================================="
-          echo "Pushed images:"
+          echo "Pushed images (immutable SHA tags):"
           echo "  Backend:  $ECR_REGISTRY/$ECR_REPOSITORY:backend-$IMAGE_TAG"
-          echo "  Backend:  $ECR_REGISTRY/$ECR_REPOSITORY:backend-latest"
           echo "  Frontend: $ECR_REGISTRY/$ECR_REPOSITORY:frontend-$IMAGE_TAG"
-          echo "  Frontend: $ECR_REGISTRY/$ECR_REPOSITORY:frontend-latest"
           echo "=========================================="
 
   # ==========================================================

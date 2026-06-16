@@ -179,12 +179,12 @@ On push to `main`:
 
 ### ECR Image Tags
 
-Both images share one ECR repository with tag prefixes:
+Both images share one ECR repository with commit SHA tags (immutable):
 
 | Image | Tags |
 |-------|------|
-| Backend | `backend-<commit-sha>`, `backend-latest` |
-| Frontend | `frontend-<commit-sha>`, `frontend-latest` |
+| Backend | `backend-<commit-sha>` |
+| Frontend | `frontend-<commit-sha>` |
 
 See [docs/ci-cd-flow.md](docs/ci-cd-flow.md) for detailed setup.
 

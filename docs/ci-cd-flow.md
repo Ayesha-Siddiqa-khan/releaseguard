@@ -66,9 +66,10 @@ Push to main
 #### 1. Build & Push to ECR
 - Authenticates via GitHub OIDC → AWS IAM Role (no static keys)
 - Logs into Amazon ECR
-- Builds backend image, pushes as `backend-<sha>` and `backend-latest`
-- Builds frontend image, pushes as `frontend-<sha>` and `frontend-latest`
+- Builds backend image, pushes as `backend-<commit-sha>` (immutable)
+- Builds frontend image, pushes as `frontend-<commit-sha>` (immutable)
 - **Both images go to the same ECR repository** (e.g., `infra-dev/backend-api`)
+- Uses commit SHA tags only — compatible with ECR immutable tags
 
 #### 2. Deploy to Kubernetes
 - SSHs into the Kubernetes control-plane node
@@ -101,14 +102,14 @@ Push to main
 
 ### ECR Image Tags
 
-Both images are pushed to the **same ECR repository** using tags to differentiate:
+Both images are pushed to the **same ECR repository** using commit SHA tags (immutable):
 
 | Image | Tag Pattern | Example |
 |-------|-------------|---------|
 | Backend | `backend-<commit-sha>` | `backend-abc123def456` |
-| Backend | `backend-latest` | `backend-latest` |
 | Frontend | `frontend-<commit-sha>` | `frontend-abc123def456` |
-| Frontend | `frontend-latest` | `frontend-latest` |
+
+> **Note:** Only commit SHA tags are used. The ECR repository has immutable tags enabled, so `latest` tags are not pushed.
 
 ---
 

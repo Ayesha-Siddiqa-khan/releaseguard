@@ -125,14 +125,14 @@ Confirm `.gitignore` excludes:
 
 ### Your ECR repository
 
-You already have one ECR repository for trial use. The workflow uses it for **both** backend and frontend images with different tags:
+You already have one ECR repository for trial use. The workflow uses it for **both** backend and frontend images with commit SHA tags:
 
 | Image | Tag |
 |-------|-----|
 | Backend | `backend-<commit-sha>` |
-| Backend | `backend-latest` |
 | Frontend | `frontend-<commit-sha>` |
-| Frontend | `frontend-latest` |
+
+> **Note:** The ECR repository has immutable tags enabled. Only unique commit SHA tags are pushed — no `latest` tags.
 
 ### Verify your ECR repository exists
 
@@ -249,7 +249,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: <YOUR_ECR_REGISTRY>/infra-dev/backend-api:backend-latest
+          image: <YOUR_ECR_REGISTRY>/infra-dev/backend-api:backend-<commit-sha>
           ports:
             - containerPort: 8000
           env:
@@ -320,7 +320,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: <YOUR_ECR_REGISTRY>/infra-dev/backend-api:frontend-latest
+          image: <YOUR_ECR_REGISTRY>/infra-dev/backend-api:frontend-<commit-sha>
           ports:
             - containerPort: 3000
           env:
@@ -432,7 +432,7 @@ This triggers both workflows:
 ### Checklist
 
 - [ ] GitHub Actions workflow shows green checkmarks
-- [ ] ECR repository contains 4 new image tags (`backend-<sha>`, `backend-latest`, `frontend-<sha>`, `frontend-latest`)
+- [ ] ECR repository contains 2 new image tags (`backend-<sha>`, `frontend-<sha>`)
 - [ ] Kubernetes pods are running and ready
 - [ ] Backend `/health` endpoint returns healthy
 - [ ] Frontend opens successfully in browser
