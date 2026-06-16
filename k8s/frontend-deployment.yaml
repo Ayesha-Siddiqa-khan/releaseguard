@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: releaseguard-frontend
+  namespace: releaseguard
+  labels:
+    app: releaseguard-frontend
+    tier: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: releaseguard-frontend
+      tier: frontend
+  template:
+    metadata:
+      labels:
+        app: releaseguard-frontend
+        tier: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: PLACEHOLDER
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: NEXT_PUBLIC_API_URL
+              value: "http://releaseguard-backend:8000"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"

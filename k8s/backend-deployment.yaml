@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: releaseguard-backend
+  namespace: releaseguard
+  labels:
+    app: releaseguard-backend
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: releaseguard-backend
+      tier: backend
+  template:
+    metadata:
+      labels:
+        app: releaseguard-backend
+        tier: backend
+    spec:
+      containers:
+        - name: backend
+          image: PLACEHOLDER
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: releaseguard-secrets
+                  key: database-url
+            - name: CORS_ORIGINS
+              value: '["http://localhost:3000","http://releaseguard-frontend"]'
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

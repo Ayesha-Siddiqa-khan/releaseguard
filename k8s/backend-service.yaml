@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: releaseguard-backend
+  namespace: releaseguard
+  labels:
+    app: releaseguard-backend
+    tier: backend
+spec:
+  selector:
+    app: releaseguard-backend
+    tier: backend
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  type: ClusterIP

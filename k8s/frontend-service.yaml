@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: releaseguard-frontend
+  namespace: releaseguard
+  labels:
+    app: releaseguard-frontend
+    tier: frontend
+spec:
+  selector:
+    app: releaseguard-frontend
+    tier: frontend
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+  type: LoadBalancer

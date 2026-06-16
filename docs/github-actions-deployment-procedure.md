@@ -11,7 +11,9 @@ Push to main
   → GitHub Actions: build Docker images
   → Push to ECR (same repo, SHA tags)
   → Decode kubeconfig from KUBE_CONFIG_B64
-  → kubectl set image (backend + frontend)
+  → Create namespace (if not exists)
+  → Apply K8s manifests from k8s/ folder
+  → Update images with real ECR URLs
   → kubectl rollout status (wait for readiness)
   → Pods running and ready
 ```
@@ -426,7 +428,9 @@ git push origin main
 
 This triggers both workflows:
 1. **CI (`ci.yml`)** — runs tests and lint checks
-2. **Deploy (`deploy.yml`)** — builds images, pushes to ECR, deploys to K8s
+2. **Deploy (`deploy.yml`)** — builds images, pushes to ECR, creates namespace, applies manifests, deploys to K8s
+
+> **First-time deployment:** The workflow automatically creates the `releaseguard` namespace and applies all K8s manifests from the `k8s/` folder. No manual setup needed.
 
 ### Monitor the deployment
 

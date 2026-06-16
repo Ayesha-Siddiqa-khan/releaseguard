@@ -170,12 +170,16 @@ On every push and pull request:
 On push to `main`:
 1. Builds backend Docker image
 2. Builds frontend Docker image
-3. Pushes both to **the same ECR repository** using different tags
+3. Pushes both to **the same ECR repository** using commit SHA tags
 4. Decodes kubeconfig from `KUBE_CONFIG_B64`
-5. Updates both deployments via `kubectl set image`
-6. Waits for rollout status
-7. Shows pods and services for verification
-8. Optionally records deployment metadata (if `API_URL` is set)
+5. Creates namespace (if not exists)
+6. Applies K8s manifests from `k8s/` folder
+7. Updates both deployments with real ECR images
+8. Waits for rollout status
+9. Shows pods and services for verification
+10. Optionally records deployment metadata (if `API_URL` is set)
+
+> **First-time deployment:** Works automatically — the workflow creates the namespace and applies all manifests.
 
 ### ECR Image Tags
 
@@ -263,6 +267,12 @@ releaseguard/
 │   │   ├── core/          # Config and constants
 │   │   └── db/            # Database session and seed
 │   └── tests/             # Backend tests
+├── k8s/                   # Kubernetes manifests
+│   ├── namespace.yaml
+│   ├── backend-deployment.yaml
+│   ├── backend-service.yaml
+│   ├── frontend-deployment.yaml
+│   └── frontend-service.yaml
 ├── infra/terraform/       # AWS infrastructure
 ├── .github/workflows/     # CI/CD pipelines
 │   ├── ci.yml             # Tests and checks

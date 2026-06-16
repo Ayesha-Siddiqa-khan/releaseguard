@@ -11,8 +11,9 @@
 #   2. Tags and pushes both images to the SAME ECR repository
 #      using commit SHA tags (backend-<sha>, frontend-<sha>)
 #   3. Decodes KUBE_CONFIG_B64 into ~/.kube/config
-#   4. Runs kubectl to update the deployments
-#   5. Waits for pods to be ready
+#   4. Creates namespace and applies K8s manifests (first-time safe)
+#   5. Updates images with real ECR URLs
+#   6. Waits for pods to be ready
 # ============================================================
 
 name: Deploy
@@ -109,6 +110,9 @@ jobs:
     needs: build-and-push
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       # --- Re-authenticate to AWS (needed for ECR login in this job) ---
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -127,21 +131,19 @@ jobs:
           echo "${{ secrets.KUBE_CONFIG_B64 }}" | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
 
-      # --- Verify cluster access ---
-      - name: Verify cluster access
+      # --- Create namespace if it doesn't exist ---
+      - name: Create namespace
         run: |
-          echo "=========================================="
-          echo "Cluster nodes:"
-          echo "=========================================="
-          kubectl get nodes
+          echo "Ensuring namespace '$K8S_NAMESPACE' exists..."
+          kubectl create namespace $K8S_NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
 
-          echo ""
-          echo "=========================================="
-          echo "Deployments in namespace: $K8S_NAMESPACE"
-          echo "=========================================="
-          kubectl get deploy -n $K8S_NAMESPACE
+      # --- Apply all K8s manifests from k8s/ folder ---
+      - name: Apply Kubernetes manifests
+        run: |
+          echo "Applying manifests from k8s/ folder..."
+          kubectl apply -f k8s/ -n $K8S_NAMESPACE
 
-      # --- Update BACKEND deployment image ---
+      # --- Update BACKEND deployment with real ECR image ---
       - name: Deploy backend
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -154,7 +156,7 @@ jobs:
             $BACKEND_CONTAINER=$FULL_IMAGE \
             -n $K8S_NAMESPACE
 
-      # --- Update FRONTEND deployment image ---
+      # --- Update FRONTEND deployment with real ECR image ---
       - name: Deploy frontend
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
